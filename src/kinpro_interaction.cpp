@@ -7,17 +7,22 @@ kinproInteractor::kinproInteractor() {
     this->nh        = new ros::NodeHandle;
 
     nh->param<std::string>("cloud_in",   pointCloudTopic,    "/camera/depth_registered/points");
-    nh->param<double>("kinpro_interaction/filter_min", filterMin, 0.0);
-    nh->param<double>("kinpro_interaction/filter_max", filterMax, 0.3);
-    nh->param<bool>("kinpro_interaction/use_concave_hull", useConcaveHull, true);
-    nh->param<double>("kinpro_interaction/concave_alpha", concaveAlpha, 0.01);
-    nh->param<double>("kinpro_interaction/plane_dist_thresh", planeDistThresh, 0.3);
-
+    nh->param<double>("kinpro_interaction/filter_min", m_filterMin, 0.0);
+    nh->param<double>("kinpro_interaction/filter_max", m_filterMax, 0.3);
+    nh->param<bool>("kinpro_interaction/use_concave_hull", m_useConcaveHull, true);
+    nh->param<double>("kinpro_interaction/concave_alpha", m_concaveAlpha, 0.01);
+    nh->param<double>("kinpro_interaction/plane_dist_thresh", m_planeDistThresh, 0.3);
+    nh->param<double>("kinpro_interaction/line_length_thresh", m_lineLengthTresh, 0.1);
+    nh->param<double>("kinpro_interaction/moving_average_size", m_averageSize, 10);
+    nh->param<double>("kinpro_interaction/max_point_distance", m_maxPointDistance, 0.05);
 
 
     pc_sub   = nh->subscribe< pcl::PointCloud<pcl::PointXYZRGB> >(pointCloudTopic, 2, &kinproInteractor::pointcloudCallback, this);
 
     linePub = nh->advertise< kinpro_interaction::line >("/line", 1, this);
+
+    m_lastCentroid = Eigen::Vector4f(0,0,0,1);
+    m_lastTip = Eigen::Vector4f(0,0,0,1);
 
     vis = new pcl::visualization::PCLVisualizer("vis", true);
     vis->setBackgroundColor(0.2, 0.2, 0.2);
@@ -41,19 +46,21 @@ void kinproInteractor::run() {
 
 void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr &msg) {
 
-
+    //filter the input cloud to contain only the values inside of reach of the user
     pcl::PointCloud<pcl::PointXYZRGB> pc;
     pcl::PassThrough<pcl::PointXYZRGB> pass;
     pass.setInputCloud (msg->makeShared());
     pass.setFilterFieldName ("z");
-    pass.setFilterLimits ((float)filterMin, (float)filterMax);
-    //pass.setFilterLimitsNegative (true);
+    pass.setFilterLimits ((float)m_filterMin, (float)m_filterMax);
     pass.filter(pc);
+
+    //display the filtered cloud
 //    this->displayCloud(pc, "msg");
 
     pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
 
+    //segmentate the plane of the pointing device to speed up next calculations
     if(!pc.points.empty()) {
         // Create the segmentation object
         pcl::SACSegmentation<pcl::PointXYZRGB> seg;
@@ -62,15 +69,16 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
         // Mandatory
         seg.setModelType (pcl::SACMODEL_PLANE);
         seg.setMethodType (pcl::SAC_RANSAC);
-        seg.setDistanceThreshold (planeDistThresh);
+        seg.setDistanceThreshold (m_planeDistThresh);
 
         seg.setInputCloud (pc.makeShared());
         seg.segment (*inliers, *coefficients);
     }
 
+    //evaluate if a plane was found
     if(!inliers->indices.empty()) {
 
-        // Project the model inliers
+        //project the model inliers
         pcl::ProjectInliers<pcl::PointXYZRGB> proj;
         proj.setModelType (pcl::SACMODEL_PLANE);
         proj.setIndices (inliers);
@@ -78,19 +86,12 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
         proj.setModelCoefficients (coefficients);
         proj.filter (pc);
 
-        //    //extract the model inliers
-        //    pcl::ExtractIndices<pcl::PointXYZRGB> extract;
-        //    extract.setInputCloud (pc.makeShared());
-        //    extract.setIndices (inliers);
-        //    extract.setNegative (false);
-        //    extract.filter (pc);
-
-        // Create a Concave Hull representation of the projected inliers
+        //create a concave or convex hull representation of the projected inliers
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZRGB>);
-        if(useConcaveHull) {
+        if(m_useConcaveHull) {
             pcl::ConcaveHull<pcl::PointXYZRGB> chull;
             chull.setInputCloud (pc.makeShared());
-            chull.setAlpha (concaveAlpha);
+            chull.setAlpha (m_concaveAlpha);
             chull.reconstruct (*cloud_hull);
         } else {
             pcl::ConvexHull<pcl::PointXYZRGB> chull;
@@ -98,47 +99,68 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
             chull.reconstruct (*cloud_hull);
         }
 
+        Eigen::Vector4f centroid, centroidAvg, tip, tipAvg;
 
-
-        Eigen::Vector4f centroid, maxPt;
-        pcl::PointXYZ o;
-
+        //calculate the centroid of the hull
         pcl::compute3DCentroid(*cloud_hull, centroid);
-        o.x = centroid(0);
-        o.y = centroid(1);
-        o.z = centroid(2);
+
+        //add the centroid to the moving average vector
+        if(validatePointDistance(m_lastCentroid, centroid)) {
+            this->addCentroidToAverage(centroid);
+        } else {
+            this->addCentroidToAverage(m_lastCentroid);
+        }
+        this->computeCentroidAverage(centroidAvg);
+
+        //visualize starting point using a sphere
+        pcl::PointXYZ o;
+        o.x = centroidAvg(0);
+        o.y = centroidAvg(1);
+        o.z = centroidAvg(2);
         if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "centroid"))
             vis->addSphere(o, 0.01, "centroid", 0);
 
-
+        //cut off points that are lying behind the centroid
         pcl::PassThrough<pcl::PointXYZRGB> passC;
         passC.setInputCloud (cloud_hull);
         passC.setFilterFieldName ("z");
-        passC.setFilterLimits ((float)(o.z), (float)filterMax);
+        passC.setFilterLimits ((float)(o.z), (float)m_filterMax);
         passC.filter(*cloud_hull);
 
-        pcl::getMaxDistance(*cloud_hull, centroid, maxPt);
-        o.x = maxPt(0);
-        o.y = maxPt(1);
-        o.z = maxPt(2);
+        //determine the point furthest from the center, should be the pointer tip
+        pcl::getMaxDistance(*cloud_hull, centroid, tip);
+
+        //add the centroid to the moving average vector
+        if(validatePointDistance(m_lastTip, tip)) {
+            this->addTipToAverage(tip);
+        } else {
+            this->addTipToAverage(m_lastTip);
+        }
+        this->computeTipAverage(tipAvg);
+
+        //visualize tip point using a sphere
+        o.x = tipAvg(0);
+        o.y = tipAvg(1);
+        o.z = tipAvg(2);
         if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "max"))
             vis->addSphere(o, 0.01, "max", 0);
-        //    for( pcl::PointCloud<pcl::PointXYZRGB>::iterator iter = cloud_hull->begin(); iter != cloud_hull->end(); ++iter)
-        //    {
-        //        pcl::PointXYZ o;
-        //        o.x = iter->x;
-        //        o.y = iter->y;
-        //        o.z = iter->z;
-        //        if(!vis->updateSphere( o, 0.01, 0.5, 0.5, 0.5, "sphere"))
-        //                vis->addSphere(o, 0.01, "sphere", 0);
-        //    }
 
-        publishLine(centroid, maxPt);
+        //publish the line based on the calculated start (center) and end (tip) points
+        publishLine(centroidAvg, tipAvg);
 
+        //copy the cloud to visualize in pclviewer
         m_pc = cloud_hull->makeShared();
+
+        //update saved values
+        m_lastCentroid = centroid;
+        m_lastTip = tip;
+
     } else {
+        //copy the original cloud to visualize in pclviewer
         m_pc = pc.makeShared();
     }
+
+    //display the processed cloud
     this->displayCloud(*m_pc);
 }
 
@@ -164,22 +186,78 @@ void kinproInteractor::publishLine(Eigen::Vector4f start, Eigen::Vector4f end, f
     Eigen::Vector4f newEnd, direction;
     direction = end - start;
     float l = sqrt(direction(0)*direction(0)+direction(1)*direction(1)+direction(2)*direction(2));
-    newEnd = start + direction*length/l;
+//    cout << "Distance: " << l << endl;
+
 
     geometry_msgs::Point s, e;
-    s.x = start(0);
-    s.y = start(1);
-    s.z = start(2);
+    if(l > m_lineLengthTresh) {
 
-    e.x = newEnd(0);
-    e.y = newEnd(1);
-    e.z = newEnd(2);
+        newEnd = start + direction*length/l;
+
+        s.x = start(0);
+        s.y = start(1);
+        s.z = start(2);
+
+        e.x = newEnd(0);
+        e.y = newEnd(1);
+        e.z = newEnd(2);
+    }else {
+        s.x = s.y = s.z = 0;
+
+        e.x = e.y = e.z = 0;
+    }
 
     kinpro_interaction::line lineMsg;
     lineMsg.start = s;
     lineMsg.end = e;
 
     linePub.publish(lineMsg);
+}
+
+
+bool kinproInteractor::validatePointDistance(Eigen::Vector4f &pt1, Eigen::Vector4f &pt2) {
+    Eigen::Vector4f diff = pt1-pt2;
+    double dist = sqrt(diff(0)*diff(0)+diff(1)*diff(1)+diff(2)*diff(2));
+    if(dist > m_maxPointDistance)
+        return false;
+
+    return true;
+}
+
+void kinproInteractor::addCentroidToAverage(Eigen::Vector4f &centroid) {
+    if(this->pointerCentroids.size() < m_averageSize) {
+        pointerCentroids.push_back(centroid);
+    }else {
+        pointerCentroids.erase(pointerCentroids.begin());
+        pointerCentroids.push_back(centroid);
+    }
+}
+
+
+void kinproInteractor::computeCentroidAverage(Eigen::Vector4f &average) {
+    average = Eigen::Vector4f(0.0, 0.0, 0.0, 0.0);
+    for(size_t i = 0; i < pointerCentroids.size(); i++) {
+        average += pointerCentroids.at(i);
+    }
+    average /= float(pointerCentroids.size());
+}
+
+void kinproInteractor::addTipToAverage(Eigen::Vector4f &centroid) {
+    if(this->pointerTips.size() < m_averageSize) {
+        pointerTips.push_back(centroid);
+    }else {
+        pointerTips.erase(pointerTips.begin());
+        pointerTips.push_back(centroid);
+    }
+}
+
+
+void kinproInteractor::computeTipAverage(Eigen::Vector4f &average) {
+    average = Eigen::Vector4f(0.0, 0.0, 0.0, 0.0);
+    for(size_t i = 0; i < pointerTips.size(); i++) {
+        average += pointerTips.at(i);
+    }
+    average /= float(pointerTips.size());
 }
 
 

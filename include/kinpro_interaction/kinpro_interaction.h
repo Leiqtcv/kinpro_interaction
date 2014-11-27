@@ -67,12 +67,19 @@ private:
     ros::Subscriber pc_sub;
     ros::Publisher linePub;
 
-    double filterMin;
-    double filterMax;
-    double planeDistThresh;
-    bool useConcaveHull;
-    double concaveAlpha;
+    double m_filterMin;
+    double m_filterMax;
+    double m_planeDistThresh;
+    double m_lineLengthTresh;
+    bool m_useConcaveHull;
+    double m_concaveAlpha;
+    double m_averageSize;
+    double m_maxPointDistance;
 
+    std::vector<Eigen::Vector4f> pointerCentroids;
+    Eigen::Vector4f m_lastCentroid;
+    std::vector<Eigen::Vector4f> pointerTips;
+    Eigen::Vector4f m_lastTip;
 
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr m_pc;
     std::string pointCloudTopic;
@@ -80,6 +87,12 @@ private:
     void pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr& msg);
     void displayCloud(pcl::PointCloud<pcl::PointXYZRGB> &pc, std::string id = std::string("cloud"));
     void publishLine(Eigen::Vector4f start, Eigen::Vector4f end, float length = 2.0);
+
+    bool validatePointDistance(Eigen::Vector4f &pt1, Eigen::Vector4f &pt2);
+    void addCentroidToAverage(Eigen::Vector4f &centroid);
+    void computeCentroidAverage(Eigen::Vector4f &average);
+    void addTipToAverage(Eigen::Vector4f &centroid);
+    void computeTipAverage(Eigen::Vector4f &average);
 };
 
 
