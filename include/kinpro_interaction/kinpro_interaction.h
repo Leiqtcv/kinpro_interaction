@@ -27,6 +27,7 @@
 
 #include <ros/ros.h>
 #include <kinpro_interaction/line.h>
+#include <std_srvs/Empty.h>
 
 #include <pcl_ros/point_cloud.h>
 #include <pcl/point_types.h>
@@ -63,9 +64,12 @@ public:
 
 private:
 
-    ros::NodeHandle* nh;
-    ros::Subscriber pc_sub;
-    ros::Publisher linePub;
+    ros::NodeHandle*                    nh;
+    ros::Subscriber                     pc_sub;
+    ros::Publisher                      linePub;
+    ros::ServiceClient                  pauseVisOdomClient;
+    ros::ServiceClient                  resumeVisOdomClient;
+    std_srvs::Empty                     m_e;
 
     double m_filterMin;
     double m_filterMax;
@@ -75,6 +79,7 @@ private:
     double m_concaveAlpha;
     double m_averageSize;
     double m_maxPointDistance;
+    bool m_visualize;
 
     std::vector<Eigen::Vector4f> pointerCentroids;
     Eigen::Vector4f m_lastCentroid;

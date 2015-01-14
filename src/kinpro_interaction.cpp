@@ -15,18 +15,24 @@ kinproInteractor::kinproInteractor() {
     nh->param<double>("kinpro_interaction/line_length_thresh", m_lineLengthTresh, 0.1);
     nh->param<double>("kinpro_interaction/moving_average_size", m_averageSize, 10);
     nh->param<double>("kinpro_interaction/max_point_distance", m_maxPointDistance, 0.05);
+    nh->param<bool>("kinpro_interaction/visualize", m_visualize, false);
 
 
     pc_sub   = nh->subscribe< pcl::PointCloud<pcl::PointXYZRGB> >(pointCloudTopic, 2, &kinproInteractor::pointcloudCallback, this);
 
     linePub = nh->advertise< kinpro_interaction::line >("/line", 1, this);
 
+    pauseVisOdomClient = nh->serviceClient < std_srvs::Empty >("/pause_fovis");
+    resumeVisOdomClient = nh->serviceClient < std_srvs::Empty >("/resume_fovis");
+
     m_lastCentroid = Eigen::Vector4f(0,0,0,1);
     m_lastTip = Eigen::Vector4f(0,0,0,1);
 
-    vis = new pcl::visualization::PCLVisualizer("vis", true);
-    vis->setBackgroundColor(0.2, 0.2, 0.2);
-    vis->addCoordinateSystem(0.5, 0.0, 0.0, 0.0);
+    if(m_visualize){
+        vis = new pcl::visualization::PCLVisualizer("vis", true);
+        vis->setBackgroundColor(0.2, 0.2, 0.2);
+        vis->addCoordinateSystem(0.5, 0.0, 0.0, 0.0);
+    }
 }
 
 kinproInteractor::~kinproInteractor() {
@@ -36,15 +42,24 @@ kinproInteractor::~kinproInteractor() {
 void kinproInteractor::run() {
     ros::Rate rate(30);
 
-    while (!vis->wasStopped() && ros::ok()){
-       ros::spinOnce();
-       vis->spinOnce();
-       rate.sleep();
+    if(m_visualize) {
+        while (!vis->wasStopped() && ros::ok()){
+            ros::spinOnce();
+            vis->spinOnce();
+            rate.sleep();
+        }
+    }else {
+        while (ros::ok()){
+           ros::spinOnce();
+           rate.sleep();
+        }
     }
     cout << "stopped!" << endl;
 }
 
 void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr &msg) {
+
+    Eigen::Vector4f centroid(0,0,0,1), centroidAvg(0,0,0,1), tip(0,0,0,1), tipAvg(0,0,0,1);
 
     //filter the input cloud to contain only the values inside of reach of the user
     pcl::PointCloud<pcl::PointXYZRGB> pc;
@@ -62,6 +77,7 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
 
     //segmentate the plane of the pointing device to speed up next calculations
     if(!pc.points.empty()) {
+        pauseVisOdomClient.call(m_e);
         // Create the segmentation object
         pcl::SACSegmentation<pcl::PointXYZRGB> seg;
         // Optional
@@ -73,6 +89,8 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
 
         seg.setInputCloud (pc.makeShared());
         seg.segment (*inliers, *coefficients);
+    }else {
+        resumeVisOdomClient.call(m_e);
     }
 
     //evaluate if a plane was found
@@ -99,8 +117,6 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
             chull.reconstruct (*cloud_hull);
         }
 
-        Eigen::Vector4f centroid, centroidAvg, tip, tipAvg;
-
         //calculate the centroid of the hull
         pcl::compute3DCentroid(*cloud_hull, centroid);
 
@@ -117,8 +133,10 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
         o.x = centroidAvg(0);
         o.y = centroidAvg(1);
         o.z = centroidAvg(2);
-        if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "centroid"))
-            vis->addSphere(o, 0.01, "centroid", 0);
+        if(m_visualize) {
+            if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "centroid"))
+                vis->addSphere(o, 0.01, "centroid", 0);
+        }
 
         //cut off points that are lying behind the centroid
         pcl::PassThrough<pcl::PointXYZRGB> passC;
@@ -142,11 +160,10 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
         o.x = tipAvg(0);
         o.y = tipAvg(1);
         o.z = tipAvg(2);
-        if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "max"))
-            vis->addSphere(o, 0.01, "max", 0);
-
-        //publish the line based on the calculated start (center) and end (tip) points
-        publishLine(centroidAvg, tipAvg);
+        if(m_visualize) {
+            if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "max"))
+                vis->addSphere(o, 0.01, "max", 0);
+        }
 
         //copy the cloud to visualize in pclviewer
         m_pc = cloud_hull->makeShared();
@@ -160,8 +177,13 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
         m_pc = pc.makeShared();
     }
 
+    //publish the line based on the calculated start (center) and end (tip) points
+    publishLine(centroidAvg, tipAvg);
+
     //display the processed cloud
-    this->displayCloud(*m_pc);
+    if(m_visualize) {
+        this->displayCloud(*m_pc);
+    }
 }
 
 void kinproInteractor::displayCloud(pcl::PointCloud<pcl::PointXYZRGB> &pc, string id) {
