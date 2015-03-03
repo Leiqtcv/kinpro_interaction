@@ -15,7 +15,10 @@ kinproInteractor::kinproInteractor() {
     nh->param<double>("kinpro_interaction/line_length_thresh", m_lineLengthTresh, 0.1);
     nh->param<double>("kinpro_interaction/moving_average_size", m_averageSize, 10);
     nh->param<double>("kinpro_interaction/max_point_distance", m_maxPointDistance, 0.05);
+    nh->param<double>("kinpro_interaction/sphere_radius", m_sphereRadius, 0.01);
     nh->param<bool>("kinpro_interaction/visualize", m_visualize, false);
+    nh->param<bool>("kinpro_interaction/debug", m_debug, false);
+    nh->param<int>("kinpro_interaction/debug_nr", m_debug_nr, 0);
 
 
     pc_sub   = nh->subscribe< pcl::PointCloud<pcl::PointXYZRGB> >(pointCloudTopic, 2, &kinproInteractor::pointcloudCallback, this);
@@ -31,7 +34,7 @@ kinproInteractor::kinproInteractor() {
     if(m_visualize){
         vis = new pcl::visualization::PCLVisualizer("vis", true);
         vis->setBackgroundColor(0.2, 0.2, 0.2);
-        vis->addCoordinateSystem(0.5, 0.0, 0.0, 0.0);
+        vis->addCoordinateSystem(0.05, 0.0, 0.0, 0.3);
     }
 }
 
@@ -61,6 +64,15 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
 
     Eigen::Vector4f centroid(0,0,0,1), centroidAvg(0,0,0,1), tip(0,0,0,1), tipAvg(0,0,0,1);
 
+    //IMAGES
+    if(m_visualize)
+        vis->removeAllShapes();
+
+    //IMAGES
+    if(m_debug && m_debug_nr == 0)
+        m_pc = msg->makeShared();
+
+
     //filter the input cloud to contain only the values inside of reach of the user
     pcl::PointCloud<pcl::PointXYZRGB> pc;
     pcl::PassThrough<pcl::PointXYZRGB> pass;
@@ -68,6 +80,10 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
     pass.setFilterFieldName ("z");
     pass.setFilterLimits ((float)m_filterMin, (float)m_filterMax);
     pass.filter(pc);
+
+    //IMAGES
+    if(m_debug && m_debug_nr >= 1)
+        m_pc = pc.makeShared();
 
     //display the filtered cloud
 //    this->displayCloud(pc, "msg");
@@ -89,6 +105,7 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
 
         seg.setInputCloud (pc.makeShared());
         seg.segment (*inliers, *coefficients);
+
     }else {
         resumeVisOdomClient.call(m_e);
     }
@@ -104,6 +121,10 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
         proj.setModelCoefficients (coefficients);
         proj.filter (pc);
 
+        //IMAGES
+        if(m_debug && m_debug_nr >= 2)
+            m_pc = pc.makeShared();
+
         //create a concave or convex hull representation of the projected inliers
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZRGB>);
         if(m_useConcaveHull) {
@@ -117,6 +138,10 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
             chull.reconstruct (*cloud_hull);
         }
 
+        //IMAGES
+        if(m_debug && m_debug_nr >= 3)
+            m_pc = cloud_hull->makeShared();
+
         //calculate the centroid of the hull
         pcl::compute3DCentroid(*cloud_hull, centroid);
 
@@ -125,25 +150,30 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
             this->addCentroidToAverage(centroid);
         } else {
             this->addCentroidToAverage(m_lastCentroid);
+            m_resetCounter++;
         }
         this->computeCentroidAverage(centroidAvg);
 
         //visualize starting point using a sphere
-        pcl::PointXYZ o;
+        pcl::PointXYZ o,p;
         o.x = centroidAvg(0);
         o.y = centroidAvg(1);
         o.z = centroidAvg(2);
-        if(m_visualize) {
-            if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "centroid"))
-                vis->addSphere(o, 0.01, "centroid", 0);
+        if(m_visualize || (m_debug && m_debug_nr >= 4)) {
+            if(!vis->updateSphere(o, m_sphereRadius, 1.0, 0.0, 0.0, "centroid"))
+                vis->addSphere(o, m_sphereRadius, "centroid", 0);
         }
 
-        //cut off points that are lying behind the centroid
+        //cut off points that are lying before the centroid
         pcl::PassThrough<pcl::PointXYZRGB> passC;
         passC.setInputCloud (cloud_hull);
         passC.setFilterFieldName ("z");
         passC.setFilterLimits ((float)(o.z), (float)m_filterMax);
         passC.filter(*cloud_hull);
+
+        //IMAGES
+        if(m_debug && m_debug_nr >= 5)
+            m_pc = cloud_hull->makeShared();
 
         //determine the point furthest from the center, should be the pointer tip
         pcl::getMaxDistance(*cloud_hull, centroid, tip);
@@ -153,24 +183,43 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
             this->addTipToAverage(tip);
         } else {
             this->addTipToAverage(m_lastTip);
+            m_resetCounter++;
         }
         this->computeTipAverage(tipAvg);
 
         //visualize tip point using a sphere
-        o.x = tipAvg(0);
-        o.y = tipAvg(1);
-        o.z = tipAvg(2);
-        if(m_visualize) {
-            if(!vis->updateSphere(o, 0.01, 0.5, 0.5, 0.5, "max"))
-                vis->addSphere(o, 0.01, "max", 0);
+        p.x = tipAvg(0);
+        p.y = tipAvg(1);
+        p.z = tipAvg(2);
+        if(m_visualize || (m_debug && m_debug_nr >= 6)) {
+            if(!vis->updateSphere(p, m_sphereRadius, 1.0, 0.0, 0.0, "max"))
+                vis->addSphere(p, m_sphereRadius, "max", 0);
+        }
+
+        //IMAGES
+        if(m_debug && m_debug_nr >= 7){
+            p.x = p.x + 2.0*(p.x - o.x);
+            p.y = p.y + 2.0*(p.y - o.y);
+            p.z = p.z + 2.0*(p.z - o.z);
+            vis->addLine(o,p,1.0,1.0,1.0,"line");
         }
 
         //copy the cloud to visualize in pclviewer
-        m_pc = cloud_hull->makeShared();
+        if(m_visualize && !m_debug){
+            m_pc = cloud_hull->makeShared();
+        }
 
         //update saved values
-        m_lastCentroid = centroid;
-        m_lastTip = tip;
+        if(m_resetCounter > 30){
+            pointerCentroids.clear();
+            pointerTips.clear();
+            m_lastCentroid = centroid;
+            m_lastTip = tip;
+            m_resetCounter = 0;
+        }else{
+            m_lastCentroid = centroidAvg;
+            m_lastTip = tipAvg;
+        }
 
     } else {
         //copy the original cloud to visualize in pclviewer
@@ -187,14 +236,6 @@ void kinproInteractor::pointcloudCallback(const pcl::PointCloud<pcl::PointXYZRGB
 }
 
 void kinproInteractor::displayCloud(pcl::PointCloud<pcl::PointXYZRGB> &pc, string id) {
-//        if(!vis->updatePointCloud(pc, id)) {
-//            pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGB> rgb(pc);
-//            pclWidget->vis->addPointCloud<pcl::PointXYZRGB>(pc, rgb, id);
-//            pclWidget->vis->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, id);
-////            pclWidget->vis->addPointCloud<pcl::PointXYZRGB>(pc, id);
-
-//            cout << "Adding new RGB cloud" << endl;
-//        }
         if(!vis->updatePointCloud<pcl::PointXYZRGB>(pc.makeShared(), id)) {      //adding <pcl::PointXYZRGB> leads to ignoring color values
             vis->addPointCloud<pcl::PointXYZRGB>(pc.makeShared(), id);
 
@@ -297,69 +338,3 @@ int main(int argc, char **argv) {
     node.run();
     return 0;
 }
-
-//#include <pcl/visualization/cloud_viewer.h>
-//#include <iostream>
-//#include <pcl/io/io.h>
-//#include <pcl/io/pcd_io.h>
-
-//int user_data;
-
-//void
-//viewerOneOff (pcl::visualization::PCLVisualizer& viewer)
-//{
-//    viewer.setBackgroundColor (1.0, 0.5, 1.0);
-//    pcl::PointXYZ o;
-//    o.x = 1.0;
-//    o.y = 0;
-//    o.z = 0;
-//    viewer.addSphere (o, 0.25, "sphere", 0);
-//    std::cout << "i only run once" << std::endl;
-
-//}
-
-//void
-//viewerPsycho (pcl::visualization::PCLVisualizer& viewer)
-//{
-//    static unsigned count = 0;
-//    std::stringstream ss;
-//    ss << "Once per viewer loop: " << count++;
-//    viewer.removeShape ("text", 0);
-//    viewer.addText (ss.str(), 200, 300, "text", 0);
-
-//    //FIXME: possible race condition here:
-//    user_data++;
-//}
-
-//int
-//main ()
-//{
-//    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZRGBA>);
-//   // pcl::io::loadPCDFile ("my_point_cloud.pcd", *cloud);
-
-//    pcl::visualization::CloudViewer viewer("Cloud Viewer");
-//    //////////////////
-
-//    //////////////////
-
-//    //blocks until the cloud is actually rendered
-//    viewer.showCloud(cloud);
-
-//    //use the following functions to get access to the underlying more advanced/powerful
-//    //PCLVisualizer
-
-//    //This will only get called once
-//    viewer.runOnVisualizationThreadOnce (viewerOneOff);
-
-
-//    //This will get called once per visualization iteration
-//    viewer.runOnVisualizationThread (viewerPsycho);
-//    while (!viewer.wasStopped ())
-//    {
-//    //you can also do cool processing here
-//    //FIXME: Note that this is running in a separate thread from viewerPsycho
-//    //and you should guard against race conditions yourself...
-//    user_data++;
-//    }
-//    return 0;
-//}

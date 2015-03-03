@@ -79,7 +79,11 @@ private:
     double m_concaveAlpha;
     double m_averageSize;
     double m_maxPointDistance;
+    double m_sphereRadius;
     bool m_visualize;
+    bool m_debug;
+    int m_resetCounter;
+    int m_debug_nr;
 
     std::vector<Eigen::Vector4f> pointerCentroids;
     Eigen::Vector4f m_lastCentroid;
